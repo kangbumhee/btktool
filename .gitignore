@@ -1,3 +1,15 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+dist-ssr
+
+# Environment variables (API keys - never commit!)
+.env
+.env.local
+.env.*.local
+
 # Logs
 logs
 *.log
@@ -7,25 +19,19 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
-*.local
-
-# 환경변수 파일 (API 키 포함 - 절대 커밋하면 안됨)
-.env
-.env.local
-.env.*.local
-
-# Editor directories and files
+# Editor / IDE
 .vscode/*
 !.vscode/extensions.json
 .idea
+.cursor
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Misc
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
-
-shopgenie-ai---*���*
