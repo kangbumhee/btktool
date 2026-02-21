@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { ProductInput } from './components/ProductInput';
 import { DetailPagePreview } from './components/DetailPagePreview';
 import { SettingsModal, getStoredApiKey } from './components/SettingsModal';
-import { AppState, ProductData, GeneratedCopy, HistoryItem, GeneratedDetailPage } from './types';
-import { generateFullDetailPage, regenerateSection } from './services/geminiService';
+import { AppState, ProductData, GeneratedCopy, HistoryItem } from './types';
+import { generateMarketingCopy, generateVariedScenes, generateSingleScene } from './services/geminiService';
 
 const App: React.FC = () => {
   // Key Management State
@@ -44,9 +44,7 @@ const App: React.FC = () => {
     generatedImages: [],
     mainImageIndex: 0,
     generatedCopy: null,
-    generatedPage: null,  // 새로운 상세페이지 구조
-    isEditingImage: false,
-    generationProgress: { current: 0, total: 100, message: '시작 중...' }
+    isEditingImage: false
   });
 
   // Check API Key on Mount
@@ -60,8 +58,8 @@ const App: React.FC = () => {
         return;
       }
       
-      // Check environment variable (development) - Gemini API
-      const envKey = (import.meta as any).env?.VITE_GEMINI_API_KEY;
+      // Check environment variable (development)
+      const envKey = (import.meta as any).env?.VITE_NANO_BANANA_API_KEY;
       if (envKey) {
         setIsKeyReady(true);
         setIsCheckingKey(false);
@@ -216,17 +214,18 @@ const App: React.FC = () => {
   };
 
   const handleInputSubmit = async (data: ProductData) => {
-    // Kie.ai API 키 체크
-    const kieApiKey = localStorage.getItem('nanoBananaApiKey');
-    if (!kieApiKey || !kieApiKey.trim()) {
-      // API 키 없으면 설정창 열고 대기
-      setPendingGenerate(true);
+    // API Key 체크
+    const apiKey = getStoredApiKey() || (import.meta as any).env?.VITE_NANO_BANANA_API_KEY;
+    
+    if (!apiKey) {
+      // API Key가 없으면 모달 표시하고 생성 대기
       setPendingProductData(data);
+      setPendingGenerate(true);
       setShowSettings(true);
       return;
     }
     
-    // 기존 생성 로직 계속...
+    // API Key가 있으면 생성 진행
     await executeGenerate(data);
   };
 
@@ -236,30 +235,41 @@ const App: React.FC = () => {
       step: 'processing', 
       productData: data, 
       originalImages: data.images, 
-      generatedImages: [],
-      mainImageIndex: 0,
-      generationProgress: { current: 0, total: 100, message: '시작 중...' }
+      generatedImages: [], // Clear previous
+      mainImageIndex: 0
     }));
     
     try {
-      const result = await generateFullDetailPage(
-        data,
-        (current, total, message) => {
-          setState(prev => ({
-            ...prev,
-            generationProgress: { current, total, message }
-          }));
-        }
-      );
+      // Execute in parallel: Marketing Copy + Additional Scenes
+      const [copy, newScenes] = await Promise.all([
+        generateMarketingCopy(data),
+        generateVariedScenes(data)
+      ]);
+
+      // DO NOT include original low-quality images.
+      // Use ONLY the AI generated high-quality scenes.
+      const allImages = [...newScenes];
 
       setState(prev => ({ 
         ...prev, 
         step: 'preview', 
-        generatedPage: result
+        generatedCopy: copy,
+        generatedImages: allImages
       }));
     } catch (error: any) {
       console.error("Error generating content:", error);
-      alert("컨텐츠 생성 중 오류가 발생했습니다.\n\n" + (error.message || ""));
+      
+      // 크레딧 부족 에러 처리
+      if (error.message?.includes("CREDITS_INSUFFICIENT") || 
+          error.message?.toLowerCase().includes("insufficient") || 
+          error.message?.toLowerCase().includes("credits")) {
+        alert("⚠️ Nano Banana API 크레딧이 부족합니다!\n\nkie.ai에서 크레딧을 충전해주세요.\n\n👉 https://kie.ai/pricing");
+        setState(prev => ({ ...prev, step: 'input' }));
+        return;
+      }
+      
+      // 기타 에러
+      alert("컨텐츠 생성 중 오류가 발생했습니다. API 키가 설정되어 있는지 확인해주세요.\n\n" + (error.message || ""));
       setState(prev => ({ ...prev, step: 'input' }));
     }
   };
@@ -297,45 +307,27 @@ const App: React.FC = () => {
     });
   };
 
-  const handleSectionRegenerate = async (sectionId: string) => {
-    if (!state.generatedPage) return;
-    
-    const section = state.generatedPage.sections.find(s => s.id === sectionId);
-    if (!section) return;
-    
+  const handleRegenerateImage = async (index: number, prompt: string) => {
     try {
-      setState(prev => ({
-        ...prev,
-        generatedPage: prev.generatedPage ? {
-          ...prev.generatedPage,
-          sections: prev.generatedPage.sections.map(s => 
-            s.id === sectionId ? { ...s, isGenerating: true } : s
-          )
-        } : null
-      }));
+      // 로딩 상태 설정
+      setState(prev => ({ ...prev, isEditingImage: true }));
       
-      const newImageUrl = await regenerateSection(section, state.productData);
+      // 모델명 결정: pro면 nano-banana-pro, 아니면 nano-banana-edit
+      const modelName = state.productData.selectedModel === 'pro' ? 'nano-banana-pro' : 'nano-banana-edit';
       
-      setState(prev => ({
-        ...prev,
-        generatedPage: prev.generatedPage ? {
-          ...prev.generatedPage,
-          sections: prev.generatedPage.sections.map(s => 
-            s.id === sectionId ? { ...s, imageUrl: newImageUrl, isGenerating: false } : s
-          )
-        } : null
-      }));
+      // 참고 이미지(원본 제품 이미지) 포함하여 재생성
+      const referenceImages = state.productData.images || [];
+      const newImageUrl = await generateSingleScene(modelName, referenceImages, prompt);
+      
+      // 이미지 업데이트
+      setState(prev => {
+        const updatedImages = [...prev.generatedImages];
+        updatedImages[index] = { ...updatedImages[index], url: newImageUrl, prompt };
+        return { ...prev, generatedImages: updatedImages, isEditingImage: false };
+      });
     } catch (error) {
-      console.error('섹션 재생성 실패:', error);
-      setState(prev => ({
-        ...prev,
-        generatedPage: prev.generatedPage ? {
-          ...prev.generatedPage,
-          sections: prev.generatedPage.sections.map(s => 
-            s.id === sectionId ? { ...s, isGenerating: false } : s
-          )
-        } : null
-      }));
+      console.error('이미지 재생성 실패:', error);
+      setState(prev => ({ ...prev, isEditingImage: false }));
       alert('이미지 재생성에 실패했습니다. 다시 시도해주세요.');
     }
   };
@@ -373,14 +365,14 @@ const App: React.FC = () => {
 
   // 히스토리에 저장
   const saveToHistory = () => {
-    if (!state.generatedPage || state.generatedPage.sections.length === 0) return;
+    if (!state.generatedCopy || state.generatedImages.length === 0) return;
     
-    // 섹션 이미지 URL 추출
-    const sectionImages = state.generatedPage.sections
-      .filter(s => s.imageUrl && !s.imageUrl.startsWith('data:'))
-      .map(s => ({ url: s.imageUrl!, prompt: s.visualPrompt }));
+    // 외부 URL만 저장 (Base64 이미지 제외)
+    const filteredImages = state.generatedImages.filter(img => 
+      img.url && !img.url.startsWith('data:')
+    );
     
-    if (sectionImages.length === 0) {
+    if (filteredImages.length === 0) {
       alert('저장 가능한 이미지가 없습니다. (외부 URL 이미지만 저장 가능)');
       return;
     }
@@ -393,10 +385,9 @@ const App: React.FC = () => {
         ...state.productData,
         images: [] // 원본 이미지(Base64)는 저장하지 않음
       },
-      generatedImages: sectionImages,
-      generatedCopy: null, // 새로운 구조에서는 generatedCopy 사용 안 함
-      generatedPage: state.generatedPage, // 새로운 구조 저장
-      thumbnail: state.generatedPage?.thumbnail?.imageUrl || sectionImages[0]?.url || '',
+      generatedImages: filteredImages,
+      generatedCopy: state.generatedCopy,
+      thumbnail: filteredImages[0]?.url || '',
       originalImages: state.productData.images.filter(url => !url.startsWith('data:'))  // 외부 URL만 저장
     };
     
@@ -416,9 +407,7 @@ const App: React.FC = () => {
       generatedImages: item.generatedImages,
       mainImageIndex: 0,
       generatedCopy: item.generatedCopy,
-      generatedPage: item.generatedPage || null, // 새로운 구조 복원
-      isEditingImage: false,
-      generationProgress: { current: 100, total: 100, message: '완료' }
+      isEditingImage: false
     });
     setShowHistory(false);
   };
@@ -433,7 +422,7 @@ const App: React.FC = () => {
     try {
       setIsGeneratingLink(true);
       
-      if (!state.generatedPage || state.generatedPage.sections.length === 0) {
+      if (state.generatedImages.length === 0) {
         alert('공유할 이미지가 없습니다.');
         return;
       }
@@ -447,17 +436,16 @@ const App: React.FC = () => {
         return;
       }
       
-      // 섹션 이미지 로드
+      // 이미지 로드
       const loadedImages: HTMLImageElement[] = [];
-      for (const section of state.generatedPage.sections) {
-        if (!section.imageUrl) continue;
+      for (const img of state.generatedImages) {
         try {
           const imageElement = new Image();
           imageElement.crossOrigin = 'anonymous';
           await new Promise<void>((resolve, reject) => {
             imageElement.onload = () => resolve();
             imageElement.onerror = () => reject(new Error('이미지 로드 실패'));
-            imageElement.src = section.imageUrl!;
+            imageElement.src = img.url;
           });
           loadedImages.push(imageElement);
         } catch (e) {
@@ -489,11 +477,30 @@ const App: React.FC = () => {
         currentY += scaledHeight;
       }
       
-      // 2. 합쳐진 이미지를 base64로 변환 후 Cloudinary 업로드
+      // 2. 합쳐진 이미지를 base64로 변환 후 imgbb 업로드
       const mergedImageBase64 = canvas.toDataURL('image/jpeg', 0.9);
+      const base64Data = mergedImageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
       
-      const { uploadToCloudinary } = await import('./services/cloudinaryService');
-      const imageUrl = await uploadToCloudinary(mergedImageBase64, 'shared-pages');
+      const apiKey = (import.meta as any).env?.VITE_IMGBB_API_KEY;
+      if (!apiKey) {
+        throw new Error('imgbb API 키가 설정되지 않았습니다.');
+      }
+      
+      const formData = new FormData();
+      formData.append('image', base64Data);
+      
+      const response = await fetch(`https://api.imgbb.com/1/upload?key=${apiKey}`, {
+        method: 'POST',
+        body: formData
+      });
+      
+      const imgbbData = await response.json();
+      
+      if (!imgbbData.success || !imgbbData.data?.url) {
+        throw new Error('이미지 업로드 실패');
+      }
+      
+      const imageUrl = imgbbData.data.url;
       
       // 3. 공유 데이터 생성
       const shareData = {
@@ -550,7 +557,7 @@ const App: React.FC = () => {
           step: 'preview',
           productData: {
             ...decoded.productData,
-            images: decoded.originalImages || decoded.productData?.images || []
+            images: decoded.originalImages || decoded.productData?.images || []  // 참고 이미지 복원
           },
           originalImages: decoded.originalImages || [],
           generatedImages: decoded.images.map((url: string) => ({
@@ -558,7 +565,6 @@ const App: React.FC = () => {
             prompt: ''
           })),
           generatedCopy: decoded.copy,
-          generatedPage: null,  // 이 줄 추가!
           mainImageIndex: decoded.mainImageIndex || 0,
           isEditingImage: false
         });
@@ -572,6 +578,7 @@ const App: React.FC = () => {
   };
 
   const handleReset = () => {
+    // Reset all state to initial values immediately
     setState({
       step: 'input',
       productData: { 
@@ -589,11 +596,9 @@ const App: React.FC = () => {
       generatedImages: [],
       mainImageIndex: 0,
       generatedCopy: null,
-      generatedPage: null,  // 이 줄 추가!
       isEditingImage: false
     });
   };
-  
 
   // 1. Loading State (Checking Key) - 최초 로딩만 표시
   if (isCheckingKey) {
@@ -767,7 +772,7 @@ const App: React.FC = () => {
                  {/* 데스크톱 정보 표시 */}
                  <div className="flex items-center gap-4 hidden md:flex">
                    <span className="px-2 py-1 bg-slate-100 rounded text-xs text-slate-500 font-mono">
-                     Model: {state.productData.selectedModel === 'pro' ? 'Gemini Pro' : 'Gemini Flash'}
+                     Model: {state.productData.selectedModel === 'pro' ? 'Nano Banana Pro' : 'Nano Banana'}
                    </span>
                    <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs font-bold uppercase">
                      {state.productData.platform}
@@ -806,68 +811,84 @@ const App: React.FC = () => {
         )}
 
         {state.step === 'processing' && (
-          <div className="flex flex-col items-center justify-center py-20">
-            {/* 원형 프로그레스 */}
-            <div className="relative w-32 h-32 mb-6">
-              <svg className="w-32 h-32 transform -rotate-90">
-                <circle
-                  cx="64"
-                  cy="64"
-                  r="56"
-                  stroke="#e5e7eb"
-                  strokeWidth="8"
-                  fill="none"
-                />
-                <circle
-                  cx="64"
-                  cy="64"
-                  r="56"
-                  stroke="#8b5cf6"
-                  strokeWidth="8"
-                  fill="none"
-                  strokeLinecap="round"
-                  strokeDasharray={`${2 * Math.PI * 56}`}
-                  strokeDashoffset={`${2 * Math.PI * 56 * (1 - (state.generationProgress?.current || 0) / 100)}`}
-                  className="transition-all duration-300"
-                />
-              </svg>
-              <div className="absolute inset-0 flex items-center justify-center">
-                <span className="text-2xl font-bold text-purple-600">
-                  {state.generationProgress?.current || 0}%
-                </span>
-              </div>
+          <div className="flex flex-col items-center justify-center min-h-[60vh]">
+            <div className="relative w-24 h-24 mb-8">
+              <div className="absolute inset-0 border-4 border-slate-200 rounded-full"></div>
+              <div className="absolute inset-0 border-4 border-blue-600 rounded-full border-t-transparent animate-spin"></div>
             </div>
             
-            {/* 메시지 */}
-            <p className="text-lg text-gray-600 mb-4">
-              {state.generationProgress?.message || '상세페이지를 생성하고 있습니다...'}
-            </p>
+            {/* 타이머 표시 */}
+            <div className="text-4xl font-bold text-blue-600 mb-4 font-mono">
+              {Math.floor(elapsedTime / 60).toString().padStart(2, '0')}:{(elapsedTime % 60).toString().padStart(2, '0')}
+            </div>
             
-            {/* 경과 시간 */}
-            <p className="text-sm text-gray-400">
-              ⏱️ 경과 시간: {elapsedTime}초
+            <h3 className="text-2xl font-bold text-slate-800 mb-2">AI가 상세페이지를 디자인 중입니다</h3>
+            <p className="text-slate-500 mb-2 font-medium text-blue-600">
+              {state.productData.platform === 'coupang' ? '쿠팡' : '스마트스토어'} 맞춤 디자인 적용 중...
             </p>
+            <p className="text-slate-400 text-sm">레퍼런스 스타일을 분석하여 고화질 이미지를 생성합니다.</p>
           </div>
         )}
 
-        {state.step === 'preview' && state.generatedPage && (
-          <DetailPagePreview 
-            generatedPage={state.generatedPage}
-            productData={state.productData}
-            onSectionUpdate={(sectionId, newImageUrl) => {
-              setState(prev => ({
-                ...prev,
-                generatedPage: prev.generatedPage ? {
-                  ...prev.generatedPage,
-                  sections: prev.generatedPage.sections.map(s => 
-                    s.id === sectionId ? { ...s, imageUrl: newImageUrl } : s
-                  )
-                } : null
-              }));
-            }}
-            onReset={handleReset}
-            onSave={saveToHistory}
-          />
+        {state.step === 'preview' && state.generatedCopy && state.generatedImages.length > 0 && (
+          <>
+            {/* 히스토리 저장 버튼 */}
+            <div className="flex justify-end gap-2 mb-4">
+              {/* PC에서만 표시: 모바일 미리보기 토글 */}
+              <button
+                onClick={() => setIsMobilePreview(!isMobilePreview)}
+                className="hidden md:flex px-3 py-2 bg-slate-100 text-slate-600 rounded-xl font-medium hover:bg-slate-200 transition-all items-center gap-2"
+              >
+                {isMobilePreview ? '🖥️ PC 보기' : '📱 모바일 보기'}
+              </button>
+              <button
+                onClick={saveToHistory}
+                className="bg-purple-600 text-white px-4 py-2 rounded-lg shadow-md hover:bg-purple-700 transition-all flex items-center gap-2"
+              >
+                💾 히스토리에 저장
+              </button>
+              <button
+                onClick={generateShareLink}
+                disabled={isGeneratingLink}
+                className="bg-green-600 text-white px-4 py-2 rounded-lg shadow-md hover:bg-green-700 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isGeneratingLink ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                    <span>링크 생성중...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>🔗</span>
+                    <span>공유 링크 복사</span>
+                  </>
+                )}
+              </button>
+            </div>
+            
+            {/* 상세페이지 미리보기 */}
+            <div className={isMobilePreview ? "flex justify-center py-4" : ""}>
+              <div className={isMobilePreview ? "w-[375px] bg-white shadow-2xl rounded-lg overflow-hidden" : "w-full"}>
+                <DetailPagePreview 
+                  images={state.generatedImages}
+                  mainImageIndex={state.mainImageIndex}
+                  copy={state.generatedCopy}
+                  productData={state.productData}
+                  onImageUpdate={handleImageUpdate}
+                  onMainImageSelect={handleMainImageSelect}
+                  onReset={handleReset}
+                  onCopyUpdate={handleCopyUpdate}
+                  onRegenerateImage={handleRegenerateImage}
+                  originalImages={state.productData.images}
+                  onUndo={handleUndo}
+                  onRedo={handleRedo}
+                  canUndo={currentHistoryIndex > 0}
+                  canRedo={currentHistoryIndex < stateHistory.length - 1}
+                  onImageReorder={handleImageReorder}
+                />
+              </div>
+            </div>
+          </>
         )}
       </main>
 
@@ -875,7 +896,7 @@ const App: React.FC = () => {
       <footer className="bg-white border-t border-slate-200 py-8">
         <div className="max-w-7xl mx-auto px-4 flex flex-col md:flex-row justify-center items-center gap-4">
           <div className="text-slate-400 text-sm text-center">
-            Powered by Gemini AI
+            Powered by Nano Banana AI
           </div>
         </div>
       </footer>
@@ -883,22 +904,7 @@ const App: React.FC = () => {
       {/* Settings Modal */}
       <SettingsModal 
         isOpen={showSettings} 
-        onClose={() => {
-          setShowSettings(false);
-          // 대기 중인 생성 작업이 있고, API 키가 저장되었으면 자동 시작
-          if (pendingGenerate && pendingProductData) {
-            const kieApiKey = localStorage.getItem('nanoBananaApiKey');
-            if (kieApiKey && kieApiKey.trim()) {
-              setPendingGenerate(false);
-              const dataToGenerate = pendingProductData;
-              setPendingProductData(null);
-              executeGenerate(dataToGenerate);
-            } else {
-              setPendingGenerate(false);
-              setPendingProductData(null);
-            }
-          }
-        }}
+        onClose={handleSettingsClose}
         autoCloseOnSave={pendingGenerate}
       />
 
