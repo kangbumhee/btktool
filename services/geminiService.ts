@@ -499,7 +499,7 @@ export const analyzeProductImage = async (imageBase64: string): Promise<{
   }
 
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${(import.meta as any).env?.VITE_GEMINI_API_KEY || ''}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
     {
       method: 'POST',
       headers: {
@@ -581,7 +581,7 @@ export const analyzeImageWithVision = async (imageBase64: string): Promise<{
   const base64Data = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
 
   const response = await fetch(
-    `https://vision.googleapis.com/v1/images:annotate?key=${(import.meta as any).env?.VITE_GEMINI_API_KEY || ''}`,
+    `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`,
     {
       method: 'POST',
       headers: {
